@@ -7,6 +7,8 @@ add_subdirectory(COMPONENT_WHD EXCLUDE_FROM_ALL)
 
 add_subdirectory(esp8266-driver)
 
+add_subdirectory(opl1000-driver)
+
 target_link_libraries(mbed-wifi
     INTERFACE
         mbed-netsocket
