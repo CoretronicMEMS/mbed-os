@@ -607,9 +607,9 @@ nsapi_error_t OPL1000Interface::_init(void) {
     // if (!_get_firmware_ok()) {
     //   return NSAPI_ERROR_DEVICE_ERROR;
     // }
-    // if (!_esp.startup()) {
-    //   return NSAPI_ERROR_DEVICE_ERROR;
-    // }
+    if (!_esp.startup()) {
+      return NSAPI_ERROR_DEVICE_ERROR;
+    }
     _initialized = true;
   }
   return NSAPI_ERROR_OK;

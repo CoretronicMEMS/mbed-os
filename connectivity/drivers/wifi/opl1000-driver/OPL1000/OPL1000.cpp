@@ -66,13 +66,13 @@ OPL1000::OPL1000(PinName tx, PinName rx, bool debug, PinName rts, PinName cts)
   _parser.oob("2,CLOSED", callback(this, &OPL1000::_oob_socket2_closed));
   _parser.oob("3,CLOSED", callback(this, &OPL1000::_oob_socket3_closed));
   _parser.oob("4,CLOSED", callback(this, &OPL1000::_oob_socket4_closed));
-  // _parser.oob("+CWJAP:", callback(this, &OPL1000::_oob_connect_err));
+  _parser.oob("+CWJAP:", callback(this, &OPL1000::_oob_connect_err));
   _parser.oob("WIFI ", callback(this, &OPL1000::_oob_connection_status));
   _parser.oob("UNLINK", callback(this, &OPL1000::_oob_socket_close_err));
   _parser.oob("ALREADY CONNECTED", callback(this, &OPL1000::_oob_conn_already));
   _parser.oob("ERROR", callback(this, &OPL1000::_oob_err));
   _parser.oob("ready", callback(this, &OPL1000::_oob_ready));
-  //_parser.oob("+CWLAP:", callback(this, &OPL1000::_oob_scan_results));
+  _parser.oob("+CWLAP:", callback(this, &OPL1000::_oob_scan_results));
   // Don't expect to find anything about the watchdog reset in official
   // documentation
   // https://techtutorialsx.com/2017/01/21/esp8266-watchdog-functions/
@@ -234,7 +234,8 @@ bool OPL1000::start_uart_hw_flow_ctrl(void) {
 bool OPL1000::startup() {
   _smutex.lock();
   set_timeout(OPL1000_CONNECT_TIMEOUT);
-  bool done = _parser.send("AT+CIPMUX=1") && _parser.recv("OK\n");
+  bool done = _parser.send("AT+CWMODE=1\r\n") && _parser.recv("OK\n") &&
+              _parser.send("AT+CIPMUX=1") && _parser.recv("OK\n");
   set_timeout();  // Restore default
   _smutex.unlock();
 
@@ -278,26 +279,38 @@ bool OPL1000::reset(void) {
 
 nsapi_error_t OPL1000::connect(const char *ap, const char *passPhrase) {
   nsapi_error_t ret = NSAPI_ERROR_OK;
-
+  bool res_2 = false;
   _smutex.lock();
   set_timeout(OPL1000_RECV_TIMEOUT);
-  if (_conn_status != NSAPI_STATUS_CONNECTING) {
-    _parser.send("AT+CWLAP") &&
-        _parser.recv("OK\n");  // OPL1000 AT command is wrong, get timeout
-                               // (OPL1000_RECV_TIMEOUT).
-    _parser.send("AT+CWJAP=\"%s\",\"%s\"", ap, passPhrase) &&
-        _parser.recv("OK\n");  // OPL1000 AT command is wrong, get
-                               // timeout(OPL1000_RECV_TIMEOUT).
-    bool res = _parser.send("AT+CWJAP?") && _parser.recv("No AP connected\n");
-    if (res) {
-      ret = NSAPI_ERROR_AUTH_FAILURE;
-      _conn_status = NSAPI_STATUS_DISCONNECTED;
+  _parser.send("AT+CWQAP") && _parser.recv("OK\n");
+  _parser.send("AT+CWLAP") && _parser.recv("OK\n");
+  for (int i = 0; i < 3; i++) {
+    bool res = _parser.send("AT+CWJAP=\"%s\",\"%s\"\r\n", ap, passPhrase);
+    res_2 = res && _parser.recv("OK\n");
+    if (!res_2) {
+      printf("Retry-connect...\n");
+      continue;
     } else {
-      ret = NSAPI_ERROR_IS_CONNECTED;
-      _conn_status = NSAPI_STATUS_CONNECTING;
+      break;
     }
-    _conn_stat_cb();
   }
+
+  if (!res_2) {
+    if (_fail) {
+      if (_connect_error == 1) {
+        ret = NSAPI_ERROR_CONNECTION_TIMEOUT;
+      } else if (_connect_error == 2) {
+        ret = NSAPI_ERROR_AUTH_FAILURE;
+      } else if (_connect_error == 3) {
+        ret = NSAPI_ERROR_NO_SSID;
+      } else {
+        ret = NSAPI_ERROR_NO_CONNECTION;
+      }
+      _fail = false;
+      _connect_error = 0;
+    }
+  }
+
   set_timeout();
   _smutex.unlock();
 
@@ -305,15 +318,11 @@ nsapi_error_t OPL1000::connect(const char *ap, const char *passPhrase) {
 }
 
 bool OPL1000::disconnect(void) {
+  rtos::ThisThread::sleep_for(1000ms);  // OPL1000 need delay 1 sec.
   _smutex.lock();
   _disconnect = true;
-  rtos::ThisThread::sleep_for(1000);  // Wait for socket close finished.
   bool done = _parser.send("AT+CWQAP") && _parser.recv("OK\n");
-  _conn_status = NSAPI_STATUS_DISCONNECTED;
-  _conn_stat_cb();
-
   _smutex.unlock();
-
   return done;
 }
 
@@ -388,10 +397,6 @@ nsapi_error_t OPL1000::open_udp(int id, const char *addr, int port,
   }
 
   for (int i = 0; i < 2; i++) {
-    if (!(_parser.send("AT+CIPMUX=1") && _parser.recv("OK\n"))) {
-      continue;
-    }
-    rtos::ThisThread::sleep_for(1000ms);  // OPL1000 need delay 1 sec.
     if (local_port) {
       done = _parser.send("AT+CIPSTART=%d,\"%s\",\"%s\",%d,%d,%d", id, type,
                           addr, port, local_port, udp_mode);
@@ -399,15 +404,24 @@ nsapi_error_t OPL1000::open_udp(int id, const char *addr, int port,
       done =
           _parser.send("AT+CIPSTART=%d,\"%s\",\"%s\",%d", id, type, addr, port);
     }
+
     if (done) {
-      if (!_parser.recv("%d,CONNECT", &id)) {
-        printf("Cannot connect to udp ...\n");
-        done = false;
+      if (!_parser.recv("OK\n")) {
+        if (_sock_already) {
+          _sock_already = false;  // To be raised again by OOB msg
+          done = close(id);
+          if (!done) {
+            break;
+          }
+        }
+        if (_error) {
+          _error = false;
+          done = false;
+        }
         continue;
-      } else {
-        _sock_i[id].open = true;
-        _sock_i[id].proto = NSAPI_UDP;
       }
+      _sock_i[id].open = true;
+      _sock_i[id].proto = NSAPI_UDP;
       break;
     }
   }
@@ -444,23 +458,31 @@ nsapi_error_t OPL1000::open_tcp(int id, const char *addr, int port,
   }
 
   for (int i = 0; i < 2; i++) {
-    if (!(_parser.send("AT+CIPMUX=1") && _parser.recv("OK\n"))) {
-      continue;
+    if (keepalive) {
+      done = _parser.send("AT+CIPSTART=%d,\"%s\",\"%s\",%d,%d", id, type, addr,
+                          port, keepalive);
+    } else {
+      done =
+          _parser.send("AT+CIPSTART=%d,\"%s\",\"%s\",%d", id, type, addr, port);
     }
-    rtos::ThisThread::sleep_for(1000ms);  // OPL1000 need delay 1 sec.
 
-    printf("AT+CIPSTART=%d,\"%s\",\"%s\",%d\n", id, type, addr, port);
-    done =
-        _parser.send("AT+CIPSTART=%d,\"%s\",\"%s\",%d", id, type, addr, port);
     if (done) {
-      if (!_parser.recv("%d,CONNECT", &id)) {
-        printf("Cannot connect to tcp server...\n");
-        done = false;
+      if (!_parser.recv("OK\n")) {
+        if (_sock_already) {
+          _sock_already = false;  // To be raised again by OOB msg
+          done = close(id);
+          if (!done) {
+            break;
+          }
+        }
+        if (_error) {
+          _error = false;
+          done = false;
+        }
         continue;
-      } else {
-        _sock_i[id].open = true;
-        _sock_i[id].proto = NSAPI_TCP;
       }
+      _sock_i[id].open = true;
+      _sock_i[id].proto = NSAPI_TCP;
       break;
     }
   }
@@ -896,9 +918,6 @@ void OPL1000::_clear_socket_sending(int id) {
 }
 
 bool OPL1000::close(int id) {
-  if (_sock_i[id].open == false) {
-    return true;
-  }
   // May take a second try if device is busy
   for (unsigned i = 0; i < 2; i++) {
     _smutex.lock();
@@ -1003,17 +1022,17 @@ void OPL1000::_oob_tcp_data_hdlr() {
   _sock_i[_sock_active_id].tcp_data_rcvd = len;
 }
 
-// void OPL1000::_oob_scan_results() {
-//   nsapi_wifi_ap_t ap;
+void OPL1000::_oob_scan_results() {
+  nsapi_wifi_ap_t ap;
 
-//   if (_recv_ap(&ap)) {
-//     if (_scan_r.res && _scan_r.cnt < _scan_r.limit) {
-//       _scan_r.res[_scan_r.cnt] = WiFiAccessPoint(ap);
-//     }
+  if (_recv_ap(&ap)) {
+    if (_scan_r.res && _scan_r.cnt < _scan_r.limit) {
+      _scan_r.res[_scan_r.cnt] = WiFiAccessPoint(ap);
+    }
 
-//     _scan_r.cnt++;
-//   }
-// }
+    _scan_r.cnt++;
+  }
+}
 
 void OPL1000::_oob_connect_err() {
   _fail = false;

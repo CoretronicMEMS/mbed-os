@@ -34,7 +34,7 @@
 #define OPL1000_SEND_TIMEOUT 2s
 #endif
 #ifndef OPL1000_RECV_TIMEOUT
-#define OPL1000_RECV_TIMEOUT std::chrono::seconds(3)
+#define OPL1000_RECV_TIMEOUT std::chrono::seconds(5)
 #endif
 #ifndef OPL1000_MISC_TIMEOUT
 #define OPL1000_MISC_TIMEOUT std::chrono::seconds(2)
@@ -443,7 +443,7 @@ class OPL1000 {
   void _oob_busy();
   void _oob_tcp_data_hdlr();
   void _oob_ready();
-  // void _oob_scan_results();
+  void _oob_scan_results();
   void _oob_send_ok_received();
   void _oob_send_fail_received();
 
