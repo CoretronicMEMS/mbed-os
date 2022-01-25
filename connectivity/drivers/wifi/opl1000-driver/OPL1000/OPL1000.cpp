@@ -257,7 +257,9 @@ bool OPL1000::startup() {
   _smutex.lock();
   set_timeout(OPL1000_CONNECT_TIMEOUT);
   bool done = _parser.send("AT+CWMODE=1\r\n") && _parser.recv("OK\n") &&
-              _parser.send("AT+CIPMUX=1") && _parser.recv("OK\n");
+              _parser.send("AT+CIPMUX=1") && _parser.recv("OK\n") &&
+              _parser.send("AT+CWAUTOCONN=0,3\r\n") && _parser.recv("OK\n");
+
   set_timeout();  // Restore default
   _smutex.unlock();
 
@@ -530,7 +532,7 @@ bool OPL1000::dns_lookup(const char *name, char *ip) {
 }
 
 nsapi_size_or_error_t OPL1000::send(int id, const void *data, uint32_t amount) {
-  if (_sock_i[id].proto == NSAPI_TCP) {
+  if (_sock_i[id].proto == NSAPI_TCP || _sock_i[id].proto == NSAPI_UDP) {
     if (_sock_sending_id >= 0 && _sock_sending_id < SOCKET_COUNT) {
       if (!_sock_i[id].send_fail) {
         tr_debug(
@@ -574,7 +576,7 @@ nsapi_size_or_error_t OPL1000::send(int id, const void *data, uint32_t amount) {
     tr_debug("send(): AT+CIPSEND failed.");
     goto END;
   }
-  rtos::ThisThread::sleep_for(10);
+  // rtos::ThisThread::sleep_for(10);
   if (!_parser.recv(">")) {
     // This means OPL1000 hasn't even started to receive data
     tr_debug("send(): Didn't get \">\"");
